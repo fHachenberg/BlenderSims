@@ -11,6 +11,7 @@ The Sims™ is a trademark of Maxis and Electronic Arts.
 Requirements
 ------------
 
+* PySims Lib (https://github.com/fHachenberg/PySims)
 * Blender 2.76b or above
 * Gamedata from the The Sims™
 
