@@ -10,20 +10,22 @@ import mathutils
 
 from functools import cmp_to_key
 
-def add_obj_from_sknbmf_stream(skel_stream, mesh_streams, textures, objname):
+def create_armature(skel_stream, objname=None):
     '''
     @param skel_stream DataStream containing exactly one skeleton, which is imported as an armature
-    @param mesh_streams list of skn/bmf DataStreams which are added and deformed by the armature
-    @param textures dict of <tex_basename>:<filename of texture file>
+    @param objname Name for scene object pointing to armature to be created. Default is game's internal name for skeleton
     @return scene object linked to armature
     '''
     scene = bpy.context.scene
 
     #load skeleton data
     sceleton_obj = PySims.cmx_bcf.read_characterdata_from_stream(skel_stream)
-    assert len(sceleton_obj.sceletons) == 1
+    assert len(sceleton_obj.sceletons) == 1 #sanity check
     sceleton = sceleton_obj.sceletons[0]
-    armature = bpy.data.armatures.new("adult")
+
+    if objname == None:
+        objname = sceleton.name
+    armature = bpy.data.armatures.new(objname)
 
     armobj = bpy.data.objects.new(objname, armature)
     scene.objects.link(armobj)
@@ -74,83 +76,120 @@ def add_obj_from_sknbmf_stream(skel_stream, mesh_streams, textures, objname):
 
     bpy.ops.object.mode_set(mode='OBJECT')
 
-    #load mesh data
-    for stream in mesh_streams:
-        mesh = PySims.skn_bmf.read_deformablemesh_from_stream(stream)
-
-        blmesh = bpy.data.meshes.new(objname+"_meshdta")
-
-        #vertices are specified relative to their bone. So now we
-        #have to go through all bones and transform the vertices according
-        #to the bone's coordinate system
-        locs  = [mathutils.Vector(p[0:3]) for p in mesh.vertices[0:len(mesh.uvcoords)]]
-        #norms = [mathutils.Vector(p[3:6]) for p in mesh.vertices]
-        for boneidx, bonename in enumerate(mesh.bones):
-            armbone = armature.bones[armature.bones.find(bonename)]
-            binding = mesh.bonebindings[boneidx]
-            _, frst_wghtone, num_wghtone, frst_wghtotr, num_wghtotr = binding
-            for i in range(frst_wghtone, frst_wghtone+num_wghtone):
-                locs[i] = armbone.matrix_local * locs[i].to_4d()
-
-        blmesh.from_pydata([a[:3] for a in locs], [], mesh.faces)
-        blmesh.update()
-
-        blobj = bpy.data.objects.new(objname, blmesh)
-        armmod = blobj.modifiers.new("arm", 'ARMATURE')
-        armmod.object = armobj
-
-        #create vertex groups
-        for boneidx, bonename in enumerate(mesh.bones):
-
-            vgroup = blobj.vertex_groups.new(bonename)
-            binding = mesh.bonebindings[boneidx]
-            _, frst_wghtone, num_wghtone, frst_wghtotr, num_wghtotr = binding
-            vgroup.add(range(frst_wghtone, frst_wghtone+num_wghtone), 1.0, 'ADD')
-            for i in range(frst_wghtotr, frst_wghtotr+num_wghtotr):
-                vertidx, weight = mesh.blenddata[i]
-                vgroup.add([vertidx], float(weight)/65568.0, 'ADD')
-
-        scene.objects.link(blobj)
-
-        #load texture and uv coordinates onto mesh
-        tex_basename = mesh.texfilename
-
-        #initialize uv coordinates of vertices
-        bm = bmesh.new()
-        bm.from_mesh(blmesh)
-
-        bm.faces.layers.tex.verify()
-        uv_layer = bm.loops.layers.uv.verify()
-
-        for face in bm.faces:
-            for i, loop in enumerate(face.loops):
-                uv = loop[uv_layer].uv
-                #v dimension has to be mirrored to achieve correct orientation of vertices on texture
-                uv[:] = (mesh.uvcoords[loop.vert.index][0], 1.0-mesh.uvcoords[loop.vert.index][1])
-
-        bm.to_mesh(blmesh)
-        bm.free()
-
-        if tex_basename != "x": #x indicates that no texture was specified in the skn file
-            #load texture
-            tex_filename = textures[tex_basename]
-            tex_image = bpy.data.images.load(tex_filename)
-
-            texlayer = blmesh.uv_textures[0]#.new(name=tex_basename)
-            texlayer.active = True
-            texlayer.data[0].image = tex_image
-            #uvlayer = blmesh.uv_layers[tex_basename]
-            #uvlayer.data[0].uv = mesh.uvcoords
-
     return armobj
 
-def add_action_from_skill(armobj, anim_stream, skill_name, anim_dta_streams):
+def add_mesh_to_armature(armobj, mesh_stream, texfilenames, custom_texname = None, objname = None):
+    '''
+    @param armobj scene object for armature
+    @param mesh_stream skn/bmf DataStream
+    @param texfilenames object allowing to retrieve filename of texture via texfilenames[texture_basename]
+    @param custom_texname Texture to apply to mesh (overwriting default texture eventually)
+    @param objname Name for scene object pointing to mesh to be created. Default is game's internal name for mesh
+    @return scene mesh object
+    '''
+    scene = bpy.context.scene
+    stream = mesh_stream
+
+    #load armature data from armature object
+    armature = armobj.data
+
+    #load mesh data
+    mesh = PySims.skn_bmf.read_deformablemesh_from_stream(stream)
+
+    #if no objname was given, the game's name for it is used
+    if objname == None:
+        objname = mesh.name
+    blmesh = bpy.data.meshes.new(objname)
+
+    #vertices are specified relative to their bone. So now we
+    #have to go through all bones and transform the vertices according
+    #to the bone's coordinate system
+    locs  = [mathutils.Vector(p[0:3]) for p in mesh.vertices[0:len(mesh.uvcoords)]]
+    #norms = [mathutils.Vector(p[3:6]) for p in mesh.vertices]
+    for boneidx, bonename in enumerate(mesh.bones):
+        armbone = armature.bones[armature.bones.find(bonename)]
+        binding = mesh.bonebindings[boneidx]
+        _, frst_wghtone, num_wghtone, frst_wghtotr, num_wghtotr = binding
+        for i in range(frst_wghtone, frst_wghtone+num_wghtone):
+            locs[i] = armbone.matrix_local * locs[i].to_4d()
+
+    blmesh.from_pydata([a[:3] for a in locs], [], mesh.faces)
+    blmesh.update()
+
+    blobj = bpy.data.objects.new(objname, blmesh)
+    armmod = blobj.modifiers.new("arm", 'ARMATURE')
+    armmod.object = armobj
+
+    #create vertex groups
+    for boneidx, bonename in enumerate(mesh.bones):
+
+        vgroup = blobj.vertex_groups.new(bonename)
+        binding = mesh.bonebindings[boneidx]
+        _, frst_wghtone, num_wghtone, frst_wghtotr, num_wghtotr = binding
+        vgroup.add(range(frst_wghtone, frst_wghtone+num_wghtone), 1.0, 'ADD')
+        for i in range(frst_wghtotr, frst_wghtotr+num_wghtotr):
+            vertidx, weight = mesh.blenddata[i]
+            vgroup.add([vertidx], float(weight)/65568.0, 'ADD')
+
+    scene.objects.link(blobj)
+
+    #load uv coordinates onto mesh
+
+    #initialize uv coordinates of vertices
+    bm = bmesh.new()
+    bm.from_mesh(blmesh)
+
+    bm.faces.layers.tex.verify()
+    uv_layer = bm.loops.layers.uv.verify()
+
+    for face in bm.faces:
+        for i, loop in enumerate(face.loops):
+            uv = loop[uv_layer].uv
+            #v dimension has to be mirrored to achieve correct orientation of vertices on texture
+            uv[:] = (mesh.uvcoords[loop.vert.index][0], 1.0-mesh.uvcoords[loop.vert.index][1])
+
+    bm.to_mesh(blmesh)
+    bm.free() #todo(optimization) Can we reuse the bm object for multiple objects?
+
+    #There are 2 options to load a tex here:
+    # - default texture is available and user has not demanded a custom one
+    # - user has demanded a custom texture
+    default_tex_basename = mesh.texfilename
+    tex_filename = None
+    if custom_texname != None: #no default tex available
+        tex_filename = texfilenames[custom_texname]
+    elif default_tex_basename != "x": #x indicates that no default texture was specified in the skn file
+        tex_filename = texfilenames[default_tex_basename]
+
+    if tex_filename != None:
+        set_mesh_uvtexture(blobj, tex_filename)
+
+    return blobj
+
+def set_mesh_uvtexture(meshobj, tex_filename):
+    '''
+    Loads texture file as image and installs it as the
+    used uv mapped image for blmesh
+    @param meshobj scene mesh object
+    '''
+    #access data block
+    blmesh = meshobj.data
+
+    #load texture
+    tex_image = bpy.data.images.load(tex_filename)
+
+    #set texture as active image for all polys in mesh
+    for uv_face in blmesh.uv_textures.active.data:
+        print(tex_image)
+        uv_face.image = tex_image
+
+def add_action_from_skill(armobj, anim_stream, skill_choice, anim_dta_streams):
     '''
     loads animation data from cmx/bcf skill description into new action
 
     @param armobj scene object linked to armature data
     @param anim_stream cmx/bcf DataStream containing the motion to load onto the armature
-    @param skill_name name of the skill to load
+    @param skill_choice name or index of the skill to load
     @param anim_dta_streams dict (basename animation file as used in cmx/bcp file, stream to actual animation file)
     '''
 
@@ -164,11 +203,14 @@ def add_action_from_skill(armobj, anim_stream, skill_name, anim_dta_streams):
     objdta = PySims.cmx_bcf.read_characterdata_from_stream(stream)
     assert len(objdta.skills) != 0
     skill = None
-    print("Available skills: %s" % [s.name for s in objdta.skills])
-    try:
-        skill = next(s for s in objdta.skills if s.name == skill_name)
-    except StopIteration:
-        raise Exception("No skill of name '%s' found in cmx data" % skill_name)
+    #print("Available skills: %s" % [s.name for s in objdta.skills])
+    if type(skill_choice) == int:
+        skill = objdta.skills[skill_choice]
+    else:
+        try:
+            skill = next(s for s in objdta.skills if s.name == skill_name)
+        except StopIteration:
+            raise Exception("No skill of name '%s' found in cmx data" % skill_name)
     action = bpy.data.actions.new(skill.name)
     animdta.action = action
 
@@ -203,26 +245,3 @@ def add_action_from_skill(armobj, anim_stream, skill_name, anim_dta_streams):
                         keyframe_points[frame_i].co = (framelength*frame_i, raw_frames[axis_i+3][motion.rot_off+frame_i])
 
     return action
-
-class FARAnimationFileLoader(object):
-    '''
-    Operates on a FAR file, imitates a dictionary for animation files
-    An access in the form obj[basename_of_animation_file] returns a file-like object
-    to the respective animation file in the FAR archive
-
-    IMPORTANT: The object always repositions the same FAR file stream,
-    so it's not possible to use two streams received from it in parallel!
-    '''
-    def __init__(self, far_stream):
-        '''
-        @param far_stream open file-like object to a FAR archive
-        '''
-        self.far_file = FarFile(far_stream)
-        self.far_stream = far_stream
-
-    def __getitem__(self, ani_basename):
-        '''
-        @return
-        '''
-        full_filename = "%s.cfp" % ani_basename
-        return self.far_file.open(full_filename, self.far_stream)
